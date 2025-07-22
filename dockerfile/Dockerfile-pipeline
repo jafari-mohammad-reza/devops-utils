@@ -1,0 +1,9 @@
+FROM node:20-alpine
+
+RUN apk add --no-cache bash curl git
+
+RUN npm i -g pnpm
+
+RUN echo "registry=http://192.168.73.18:4873/" > /root/.npmrc && \
+    echo "//192.168.73.18:4873/:_authToken=\"lmp/pI41tcFcU7SXI+wD+1ztv0ba3xeOlxxkWk2qhvs=\"" >> /root/.npmrc && \
+    chmod 600 /root/.npmrc

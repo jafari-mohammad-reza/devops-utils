@@ -1,0 +1,57 @@
+FROM node:18 AS builder
+
+WORKDIR /opt/app
+
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential python3 make g++ \
+      libvips-dev libcairo2-dev libjpeg-dev \
+      libpango1.0-dev libgif-dev libpng-dev \
+      libpixman-1-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+
+RUN npm install -g pnpm@8
+
+
+COPY package.json pnpm-lock.yaml .npmrc ./
+
+
+ENV npm_config_platform=linux \
+    npm_config_arch=x64 \
+    npm_config_build_from_source=true \
+    npm_config_ignore_scripts=false
+
+
+RUN pnpm install
+
+
+RUN pnpm rebuild sharp \
+ && echo ">>>> Sharp build folder:" \
+ && ls -l node_modules/sharp/build/Release
+
+
+COPY . .
+RUN pnpm run build
+
+
+
+
+
+FROM node:18
+
+WORKDIR /opt/app
+
+
+COPY --from=builder /opt/app/node_modules        ./node_modules
+COPY --from=builder /opt/app/dist                ./dist
+COPY --from=builder /opt/app/package.json        ./package.json
+COPY --from=builder /opt/app/.npmrc              .npmrc
+COPY --from=builder /opt/app/tsconfig.build.json ./tsconfig.build.json
+
+EXPOSE 3000
+
+
+CMD ["npm", "start"]
+

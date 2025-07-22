@@ -1,0 +1,15 @@
+FROM node:18-alpine
+WORKDIR /opt/app
+
+ENV TZ=Asia/Tehran
+
+RUN apk add --no-cache \
+        git \
+        curl \
+        tzdata \
+        busybox-extras
+
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime
+RUN echo $TZ > /etc/timezone 
+
+RUN npm install -g pnpm
