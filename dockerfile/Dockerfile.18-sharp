@@ -38,7 +38,11 @@ RUN pnpm run build
 
 
 
-
+FROM node:18 as dev
+WORKDIR /opt/app
+COPY . .
+EXPOSE 3000
+CMD ["npm" , "start:dev"]
 FROM node:18
 
 WORKDIR /opt/app
