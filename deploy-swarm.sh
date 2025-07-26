@@ -32,4 +32,4 @@ while IFS=":" read -r name path; do
 done < "$CONFIG_FILE"
 
 echo "[+] Deploying stack '$STACK_NAME' using $STACK_FILE"
-docker stack deploy -c "$STACK_FILE" "$STACK_NAME"
+docker stack deploy --with-registry-auth -c "$STACK_FILE" "$STACK_NAME"
