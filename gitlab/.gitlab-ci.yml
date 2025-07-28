@@ -1,0 +1,49 @@
+stages:
+  - prep
+  - deploy
+
+variables:
+  NODE: 18
+  PROJECT: "iri-reporting"
+  STACK_NAME: "iri"
+  STACK_PATH: "/opt/iri"
+
+default:
+  image: 2.189.5.183:9099/ci-docker
+
+prep:
+  stage: prep
+  before_script:
+    - curl -fsSL "https://gitlab.com/-/snippets/5/raw" -o before_prep.sh
+    - curl -fsSL "https://gitlab.com/-/snippets/4/raw" -o Dockerfile
+    - curl -fsSL "https://gitlab.com/-/snippets/1/raw" -o prep.sh
+  script:
+    - source before_prep.sh
+    - bash prep.sh "$REGISTRY" "$PROJECT"
+  artifacts:
+    paths:
+      - .built-image.txt
+  allow_failure: false
+
+publish_test:
+  stage: deploy
+  when: manual
+  before_script:
+    - curl -fsSL "https://gitlab.com/-/snippets/3/raw" -o pre_deploy.sh
+    - bash pre_deploy.sh "$TEST_SWARM_HOST"
+  script:
+    - curl -fsSL "https://gitlab.com/-/snippets/2/raw" -o deploy.sh
+    - bash deploy.sh "$PROJECT" "$TEST_SWARM_HOST" "$STACK_NAME" "$STACK_PATH"
+
+publish:
+  stage: deploy
+  when: manual
+  before_script:
+    - curl -fsSL "https://gitlab.com/-/snippets/3/raw" -o pre_deploy.sh
+    - bash pre_deploy.sh "$SWARM_HOST"
+  script:
+    - curl -fsSL "https://gitlab.com/-/snippets/2/raw" -o deploy.sh
+    - bash deploy.sh "$PROJECT" "$MANAGER_HOST" "$STACK_NAME" "$STACK_PATH"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master"'
+      when: manual
