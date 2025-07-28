@@ -132,7 +132,6 @@ ssh "runner@$MANAGER_HOST" bash <<EOF
   fi
 
   if [ -f "deploy.sh" ]; then
-    chmod +x deploy.sh || true
     STACK_NAME="$STACK_NAME" PROJECT="$PROJECT" IMAGE_TAG="$IMAGE_TAG" bash deploy.sh
   else
     docker stack deploy -c "\$stack_file" "$STACK_NAME"
@@ -227,7 +226,6 @@ bash <<'EOF'
         
         # Redeploy with previous image
         if [ -f "deploy.sh" ]; then
-          chmod +x deploy.sh || true
           STACK_NAME="$STACK_NAME" PROJECT="$PROJECT" IMAGE_TAG="$PREVIOUS_IMAGE" bash deploy.sh
         else
           docker stack deploy -c "$stack_file" "$STACK_NAME"
