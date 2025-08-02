@@ -158,8 +158,8 @@ bash <<'EOF'
   sleep 10
 
   # Configuration
-  max_wait_seconds=120
-  check_interval=10
+  max_wait_seconds=300  # Increased timeout
+  check_interval=15     # Increased interval
   max_attempts=$((max_wait_seconds / check_interval))
   
   attempt=0
@@ -167,62 +167,100 @@ bash <<'EOF'
   deployment_success=false
 
   echo "Monitoring service: $service_name (timeout: ${max_wait_seconds}s)"
+  echo "Expected image: $NEW_IMAGE"
 
   while [ $attempt -lt $max_attempts ]; do
     echo ""
     echo "🔍 Checking deployment status (attempt $((attempt + 1))/$max_attempts, elapsed: $((attempt * check_interval))s)..."
 
-    # Get service status using docker service ls
-    service_info=$(docker service ls --filter name="$service_name" --format '{{.Name}}|{{.Replicas}}' 2>/dev/null || echo "")
+    # Get service status
+    service_info=$(docker service ls --filter name="$service_name" --format '{{.Name}}|{{.Replicas}}|{{.Image}}' 2>/dev/null || echo "")
 
     if [ -z "$service_info" ]; then
       echo "❌ Service $service_name not found"
       echo "Available services in stack:"
-      docker service ls --filter name="${STACK_NAME}_" --format '  {{.Name}}\t{{.Replicas}}'
+      docker service ls --filter name="${STACK_NAME}_" --format '  {{.Name}}\t{{.Replicas}}\t{{.Image}}'
     else
       replicas=$(echo "$service_info" | cut -d'|' -f2)
+      current_image=$(echo "$service_info" | cut -d'|' -f3)
       running=$(echo "$replicas" | cut -d'/' -f1)
       desired=$(echo "$replicas" | cut -d'/' -f2)
 
       echo "📊 Replicas: $running/$desired"
+      echo "📦 Service Image: $current_image"
 
-      # Get detailed task information for diagnostics
-      task_output=$(docker service ps "$service_name" --no-trunc --format '{{.Name}}\t{{.CurrentState}}\t{{.Error}}\t{{.DesiredState}}' 2>/dev/null || echo "")
-      
-      if [ -n "$task_output" ]; then
-        echo "📋 Recent task states:"
-        echo "$task_output" | head -8 | while IFS=$'\t' read -r name state error desired; do
-          if [ -n "$error" ] && [ "$error" != "<no value>" ]; then
-            echo "  $name: $state (Error: $error)"
-          else
-            echo "  $name: $state"
-          fi
-        done
+      # Verify the service is using the correct image
+      if [ "$current_image" != "$NEW_IMAGE" ]; then
+        echo "⚠️  Service still using old image: $current_image"
+        echo "⏳ Waiting for image update to propagate..."
+      else
+        echo "✅ Service is using correct image: $NEW_IMAGE"
       fi
 
-      # Success condition - simplified logic using service replicas
-      if [ "$running" -eq "$desired" ] && [ "$desired" -gt 0 ]; then
-        # Double check that tasks are actually running (not just reported as such)
-        running_count=$(docker service ps "$service_name" --filter "desired-state=running" --format '{{.CurrentState}}' | grep -c "Running" 2>/dev/null || echo "0")
+      # Get detailed task information
+      echo "📋 Task status:"
+      task_output=$(docker service ps "$service_name" --no-trunc --format '{{.Name}}\t{{.Image}}\t{{.CurrentState}}\t{{.Error}}\t{{.DesiredState}}' 2>/dev/null || echo "")
+      
+      if [ -n "$task_output" ]; then
+        # Count tasks by image and state
+        new_image_tasks=0
+        new_image_running=0
+        old_image_tasks=0
         
-        if [ "$running_count" -eq "$desired" ]; then
-          echo "✅ All $desired task(s) are running successfully!"
-          deployment_success=true
-          break
-        else
-          echo "⏳ Service reports $running/$desired but only $running_count tasks are actually running, waiting..."
-        fi
-      else
-        echo "⏳ Waiting for all replicas to be running ($running/$desired ready)..."
-        
-        # Show recent failures for debugging
-        failed_tasks=$(echo "$task_output" | head -5 | grep -c "Failed\|Rejected" 2>/dev/null || echo "0")
-        if [ "$failed_tasks" -gt 0 ]; then
-          echo "⚠️  $failed_tasks recent task failure(s) detected - Docker Swarm will retry automatically"
+        echo "$task_output" | head -10 | while IFS=$'\t' read -r name image state error desired; do
+          # Clean up the image name for comparison (remove digest if present)
+          clean_image=$(echo "$image" | cut -d'@' -f1)
+          clean_new_image=$(echo "$NEW_IMAGE" | cut -d'@' -f1)
           
-          # Show recent logs for debugging
-          echo "📋 Recent service logs (last 5 lines):"
-          docker service logs "$service_name" --tail 5 2>/dev/null | sed 's/^/  /' || echo "  (No logs available)"
+          if [ -n "$error" ] && [ "$error" != "<no value>" ]; then
+            echo "  $name: $state (Image: ${clean_image}) [Error: $error]"
+          else
+            echo "  $name: $state (Image: ${clean_image})"
+          fi
+        done
+
+        # Count running tasks with new image
+        new_image_running=$(echo "$task_output" | grep "Running" | grep -c "$NEW_IMAGE" 2>/dev/null || echo "0")
+        total_running=$(echo "$task_output" | grep -c "Running" 2>/dev/null || echo "0")
+        
+        echo "🔍 Analysis:"
+        echo "  - Total running tasks: $total_running"
+        echo "  - Running with new image ($NEW_IMAGE): $new_image_running"
+        echo "  - Expected running tasks: $desired"
+
+        # Success conditions:
+        # 1. All desired replicas are running
+        # 2. All running tasks are using the new image
+        # 3. No tasks are using old images and running
+        if [ "$running" -eq "$desired" ] && [ "$desired" -gt 0 ] && [ "$new_image_running" -eq "$desired" ]; then
+          # Double-check no old tasks are still running
+          old_running=$(echo "$task_output" | grep "Running" | grep -v "$NEW_IMAGE" | wc -l 2>/dev/null || echo "0")
+          
+          if [ "$old_running" -eq 0 ]; then
+            echo "✅ All $desired task(s) are running successfully with the new image!"
+            deployment_success=true
+            break
+          else
+            echo "⚠️  $old_running task(s) still running with old image, waiting for replacement..."
+          fi
+        else
+          echo "⏳ Waiting for deployment to complete..."
+          
+          # Check for failed tasks with new image
+          failed_new_tasks=$(echo "$task_output" | head -5 | grep "$NEW_IMAGE" | grep -c "Failed\|Rejected\|Shutdown" 2>/dev/null || echo "0")
+          if [ "$failed_new_tasks" -gt 0 ]; then
+            echo "❌ $failed_new_tasks task(s) with new image have failed!"
+            
+            # Get logs for failed tasks
+            # echo "📋 Recent service logs for debugging:"
+            # docker service logs "$service_name" --tail 20 2>/dev/null | sed 's/^/  /' || echo "  (No logs available)"
+            
+            # If we have multiple failures, this might indicate a persistent issue
+            if [ "$failed_new_tasks" -ge 2 ] && [ $attempt -gt 5 ]; then
+              echo "💥 Multiple task failures detected - deployment may be failing"
+              break
+            fi
+          fi
         fi
       fi
     fi
@@ -240,6 +278,11 @@ bash <<'EOF'
     echo "🎉 Deployment completed successfully!"
     echo "📊 Final status:"
     docker service ls --filter name="$service_name" --format '  {{.Name}}\t{{.Replicas}}\t{{.Image}}'
+    
+    # Show final task states
+    echo "📋 Final task status:"
+    docker service ps "$service_name" --format '  {{.Name}}\t{{.CurrentState}}\t{{.Image}}'
+    
     exit 0
   else
     echo ""
@@ -251,6 +294,11 @@ bash <<'EOF'
     echo ""
     echo "📋 Service logs (last 50 lines):"
     docker service logs "$service_name" --tail 50 2>/dev/null || echo "Could not retrieve service logs"
+    
+    # Show current container status
+    echo ""
+    echo "🐳 Current container status:"
+    docker ps -a --filter "label=com.docker.swarm.service.name=$service_name" --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}'
     
     # Rollback to previous image if available
     if [ -n "$PREVIOUS_IMAGE" ] && [ "$PREVIOUS_IMAGE" != "$NEW_IMAGE" ]; then
@@ -278,28 +326,29 @@ bash <<'EOF'
         echo "🔄 Rollback deployment initiated"
         
         # Wait for rollback to complete
-        rollback_max_attempts=8
+        rollback_max_attempts=12
         rollback_attempt=0
         
         while [ $rollback_attempt -lt $rollback_max_attempts ]; do
           echo "Checking rollback status (attempt $((rollback_attempt + 1))/$rollback_max_attempts)..."
           
-          service_info=$(docker service ls --filter name="$service_name" --format '{{.Name}}|{{.Replicas}}')
+          service_info=$(docker service ls --filter name="$service_name" --format '{{.Name}}|{{.Replicas}}|{{.Image}}')
           if [ -n "$service_info" ]; then
             replicas=$(echo "$service_info" | cut -d'|' -f2)
+            image=$(echo "$service_info" | cut -d'|' -f3)
             running=$(echo "$replicas" | cut -d'/' -f1)
             desired=$(echo "$replicas" | cut -d'/' -f2)
             
-            echo "Rollback replicas: $running/$desired"
+            echo "Rollback status: $running/$desired (Image: $image)"
             
-            if [ "$running" -eq "$desired" ] && [ "$desired" -gt 0 ]; then
+            if [ "$running" -eq "$desired" ] && [ "$desired" -gt 0 ] && [ "$image" = "$PREVIOUS_IMAGE" ]; then
               echo "✅ Rollback completed successfully"
               break
             fi
           fi
           
           rollback_attempt=$((rollback_attempt + 1))
-          sleep 15
+          sleep 20
         done
         
         if [ $rollback_attempt -eq $rollback_max_attempts ]; then
