@@ -1,119 +1,109 @@
 filebeat.inputs:
-- type: log
-  enabled: true
-  paths:
-    - /var/log/nginx/domain_access.json
-  json.keys_under_root: true
-  json.add_error_key: true
-  fields:
-    service: nginx
-    domain: domain
-  fields_under_root: true
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/domain_access.json
+    json.keys_under_root: true
+    json.add_error_key: true
 
 processors:
-  - script:
-      lang: javascript
-      source: |
-        function process(event) {
-          var uri = event.Get("path");
-          if (uri && uri.indexOf("?") !== -1) {
-            var parts = uri.split("?");
-            event.Put("route", parts[0]);
-            event.Put("query", parts[1]);
-          } else {
-            event.Put("route", uri || "");
-            event.Put("query", "");
-          }
-        }
-
   - rename:
       fields:
-        - from: "user_agent"
-          to: "http.user_agent"
-      ignore_missing: true
-
-  - rename:
-      fields:
-        - from: "client_ip"
-          to: "source.ip"
-        - from: "bytes_sent"
-          to: "http.response.bytes"
-        - from: "request_length"
-          to: "http.request.bytes"
-        - from: "request_time"
-          to: "event.duration"
-        - from: "status"
-          to: "http.response.status_code"
-        - from: "method"
-          to: "http.request.method"
-        - from: "path"
-          to: "url.path"
         - from: "host"
-          to: "url.domain"
-        - from: "referer"
-          to: "http.request.referrer"
+          to: "filebeat_host"
+      ignore_missing: true
+
+  - rename:
+      fields:
+        - from: "nginx_host"
+          to: "host"
       ignore_missing: true
 
   - script:
       lang: javascript
-      source: |
+      source: >
         function process(event) {
-          var duration = event.Get("event.duration");
-          if (duration) {
-            event.Put("event.duration", Math.round(duration * 1000000000));
+          // List of all fields that might have empty strings or nulls
+          var fieldsToCheck = [
+            "client_ip", "x_real_ip", "content_length", "content_type",
+            "http_authorization", "query_string", "x_forwarded_for",
+            "accept", "accept_language", "accept_encoding", "referer"
+          ];
+
+          // Remove empty string and null fields
+          for (var i = 0; i < fieldsToCheck.length; i++) {
+            var field = fieldsToCheck[i];
+            var value = event.Get(field);
+            if (value === "" || value === null || value === undefined) {
+              event.Delete(field);
+            }
+          }
+
+          // Handle numeric fields that might be empty strings
+          var numericFields = ["status", "bytes_sent", "request_length", "request_time"];
+          for (var i = 0; i < numericFields.length; i++) {
+            var field = numericFields[i];
+            var value = event.Get(field);
+            if (value === "" || value === null || value === undefined || isNaN(value)) {
+              event.Delete(field);
+            }
+          }
+
+          // JWT processing
+          var cookie = event.Get("http_cookie");
+          if (cookie && cookie !== "" && cookie !== null) {
+            var tokenMatch = cookie.match(/token=([^;]+)/);
+            if (tokenMatch && tokenMatch[1]) {
+              var token = tokenMatch[1];
+          event.Put("token", token);
+              var parts = token.split('.');
+              if (parts.length === 3) {
+                try {
+                  var payload = JSON.parse(base64UrlDecode(parts[1]));
+                  if (payload) {
+                    // Clean JWT payload as well
+                    var jwtFields = ["sub", "iss", "r", "k", "iat", "exp"];
+                    var cleanJwt = {};
+                    for (var j = 0; j < jwtFields.length; j++) {
+                      var jwtField = jwtFields[j];
+                      if (payload[jwtField] !== undefined && payload[jwtField] !== null && payload[jwtField] !== "") {
+                        cleanJwt[jwtField] = payload[jwtField];
+                      }
+                    }
+                    if (Object.keys(cleanJwt).length > 0) {
+                      event.Put("jwt", cleanJwt);
+                    }
+                  }
+                } catch (e) {
+                  // Ignore JWT parsing errors
+                }
+              }
+            }
           }
         }
 
-  - script:
-      lang: javascript
-      source: |
-        function process(event) {
-          // Remove empty IP fields to prevent mapping errors
-          var xForwardedFor = event.Get("x_forwarded_for");
-          var xRealIp = event.Get("x_real_ip");
-
-          if (xForwardedFor === "" || xForwardedFor === null) {
-            event.Delete("x_forwarded_for");
+        function base64UrlDecode(str) {
+          str = str.replace(/-/g, '+').replace(/_/g, '/');
+          while (str.length % 4) {
+            str += '=';
           }
-
-          if (xRealIp === "" || xRealIp === null) {
-            event.Delete("x_real_ip");
+          try {
+            return atob(str);
+          } catch (e) {
+            return "";
           }
         }
 
-  - script:
-      lang: javascript
-      source: |
-        function process(event) {
-          // If url.domain is an object with 'name' property, extract the value
-          var urlDomain = event.Get("url.domain");
-
-          if (urlDomain && typeof urlDomain === "object" && urlDomain.name) {
-            event.Put("url.domain", urlDomain.name);
-          } else if (typeof urlDomain === "string") {
-            // Already a string, keep it
-            event.Put("url.domain", urlDomain);
-          }
-        }
+  - drop_fields:
+      fields: ["method", "referer", "x_forwarded_for", "accept", "accept_language", "accept_encoding", "upstream_time", "args", "http_cookie", "filebeat_host"]
 
 output.elasticsearch:
-  hosts: ["https://serveraddress:9200"]
+  hosts: ["https://elastic:9200"]
   protocol: "https"
-  username: "username"
-  password: "password"
+  username: "user"
+  password: "passwd"
   ssl.verification_mode: none
-
-  index: "domain-%{+yyyy.MM.dd}"
-
-  bulk_max_size: 100
-  worker: 1
-  compression_level: 3
+  index: "nginx-%{+yyyy.MM.dd}"
 
 setup.ilm.enabled: false
-setup.template.enabled: true
-setup.template.name: "domain"
-setup.template.pattern: "domain-*"
-setup.template.overwrite: false
-
-logging.level: info
-logging.to_stderr: true
+setup.template.enabled: false
