@@ -1,0 +1,18 @@
+FROM docker.elastic.co/logstash/logstash:8.11.0
+
+USER root
+
+# Set DNS for the plugin installation
+RUN /usr/share/logstash/bin/logstash-plugin install \
+    logstash-filter-geoip \
+    logstash-filter-mutate \
+    logstash-filter-date \
+    logstash-filter-grok \
+    logstash-input-beats \
+    logstash-output-elasticsearch \
+    logstash-codec-json_lines
+
+
+
+
+USER logstash
