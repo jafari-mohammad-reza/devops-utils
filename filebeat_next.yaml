@@ -1,0 +1,119 @@
+filebeat.inputs:
+- type: log
+  enabled: true
+  paths:
+    - /var/log/nginx/domain_access.json
+  json.keys_under_root: true
+  json.add_error_key: true
+  fields:
+    service: nginx
+    domain: domain
+  fields_under_root: true
+
+processors:
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          var uri = event.Get("path");
+          if (uri && uri.indexOf("?") !== -1) {
+            var parts = uri.split("?");
+            event.Put("route", parts[0]);
+            event.Put("query", parts[1]);
+          } else {
+            event.Put("route", uri || "");
+            event.Put("query", "");
+          }
+        }
+
+  - rename:
+      fields:
+        - from: "user_agent"
+          to: "http.user_agent"
+      ignore_missing: true
+
+  - rename:
+      fields:
+        - from: "client_ip"
+          to: "source.ip"
+        - from: "bytes_sent"
+          to: "http.response.bytes"
+        - from: "request_length"
+          to: "http.request.bytes"
+        - from: "request_time"
+          to: "event.duration"
+        - from: "status"
+          to: "http.response.status_code"
+        - from: "method"
+          to: "http.request.method"
+        - from: "path"
+          to: "url.path"
+        - from: "host"
+          to: "url.domain"
+        - from: "referer"
+          to: "http.request.referrer"
+      ignore_missing: true
+
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          var duration = event.Get("event.duration");
+          if (duration) {
+            event.Put("event.duration", Math.round(duration * 1000000000));
+          }
+        }
+
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          // Remove empty IP fields to prevent mapping errors
+          var xForwardedFor = event.Get("x_forwarded_for");
+          var xRealIp = event.Get("x_real_ip");
+
+          if (xForwardedFor === "" || xForwardedFor === null) {
+            event.Delete("x_forwarded_for");
+          }
+
+          if (xRealIp === "" || xRealIp === null) {
+            event.Delete("x_real_ip");
+          }
+        }
+
+  - script:
+      lang: javascript
+      source: |
+        function process(event) {
+          // If url.domain is an object with 'name' property, extract the value
+          var urlDomain = event.Get("url.domain");
+
+          if (urlDomain && typeof urlDomain === "object" && urlDomain.name) {
+            event.Put("url.domain", urlDomain.name);
+          } else if (typeof urlDomain === "string") {
+            // Already a string, keep it
+            event.Put("url.domain", urlDomain);
+          }
+        }
+
+output.elasticsearch:
+  hosts: ["https://serveraddress:9200"]
+  protocol: "https"
+  username: "username"
+  password: "password"
+  ssl.verification_mode: none
+
+  index: "domain-%{+yyyy.MM.dd}"
+
+  bulk_max_size: 100
+  worker: 1
+  compression_level: 3
+
+setup.ilm.enabled: false
+setup.template.enabled: true
+setup.template.name: "domain"
+setup.template.pattern: "domain-*"
+setup.template.overwrite: false
+
+logging.level: info
+logging.to_stderr: true
